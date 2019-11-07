@@ -1,103 +1,111 @@
-# input: [make.simmap output, single run]
-# does: transform simmap$mapped.edges from lengths into relative probabilities (e.g. sums to 1 for each row)
-relSim <- function(simmap){
+#' @import ape
 
-	foo<-function(x){
-		x/sum(x)
-	}
-	simmap$mapped.edge <- t(apply(simmap$mapped.edge, 1, FUN=foo))
-	return(simmap)
+# input: n - number of species, n.p - which parameter has been updated, pars - c(alp,sig,the0,the1...theN), tree, map, vcv and vector of size 4 giving the number of regime every parameter is undergoing for nr 
+# does: calculate log-likelihood; see Butler and King 2004, appendix eq. A8 and A9 and Beaulieu et al. 2012
+update_ou <- function(n, n.p, pars, tree, map, t.vcv, nr){
+  
+  mat <- list(e = list(F),
+              det = list(F),
+              inv = list(F))
+  ## extract variables
+  sv_i <- 1:nr[1]
+  sig_i <- nr[1] + 1:nr[2]
+  root_i <- nr[1] + nr[2] + nr[3]
+  the_i <- nr[1] + nr[2] + nr[3] + 1:nr[4]
+  alp  <- pars[sig_i]/(2*pars[sv_i])
+  sig <- pars[sig_i]
+  if(nr[3] == 1) root <- pars[root_i]
+  the  <- pars[the_i]
+  T.len  <- t.vcv[1, 1]
+
+  # update expectation or variance matrices depending on the updated parameter
+  pp <- prop.part(tree)
+  tree <- reorder(tree, "postorder")
+  e1 <- tree$edge[, 1]
+  e2 <- tree$edge[, 2]
+  nreg <- max(do.call(cbind,map)[1,])
+  if(length(sig) == 1) sig <- rep(sig, nreg)
+  if(length(alp) == 1) alp <- rep(alp , nreg)
+  if(length(the) == 1) the <- rep(the, nreg)
+  if(nr[3] == 1) the <- c(root, the)
+  
+  ## Matrices used for the calculations of e and v
+  if(any(c(sv_i, the_i) %in% n.p)){
+    var.cur.reg <- matrix(0,nreg,n)
+  }
+  
+  var.reg <- matrix(0,nreg,n)
+  
+  if(any(c(sig_i, sv_i) %in% n.p)){
+    covar.reg <- matrix(0,n,n)
+  }
+  
+  # loop over all edges
+  for(i in length(e1):1){
+    
+    var.node <- sapply(1:nreg, function(r){
+      -alp[r] * sum(map[[e2[i]]][3,map[[e2[i]]][1,] == r] - map[[e2[i]]][2,map[[e2[i]]][1,] == r])
+    })
+    
+    if(any(c(sig_i, sv_i) %in% n.p)){
+      covar.node <- sum(sapply(1:nreg, function(r){
+        sig[r]/(2*alp[r]) * sum(exp(2 * alp[r] * map[[e2[i]]][3,map[[e2[i]]][1,] == r]) - exp(2 * alp[r] * map[[e2[i]]][2,map[[e2[i]]][1,] == r]))
+      }))
+    }
+    
+    if(any(c(the_i, sv_i) %in% n.p)){
+      var.cur.node <- sapply(1:nreg, function(r){
+        sum(exp(alp[r] * map[[e2[i]]][3,map[[e2[i]]][1,] == r]) - exp(alp[r] * map[[e2[i]]][2,map[[e2[i]]][1,] == r]))
+      }) 
+    }
+    
+    if(e2[i] > n){ # wether it is a species or a node
+      desc <- pp[[e2[i] - n]]
+    } else {
+      desc <- e2[i]
+    } 
+    
+    # increment each matrix with the information of the ith edge
+    var.reg[,desc] <- var.reg[,desc] + var.node
+    
+    if(any(c(sig_i, sv_i) %in% n.p)){
+      covar.reg[desc, desc] <- covar.reg[desc, desc] + covar.node
+    }
+    
+    if(any(c(the_i ,sv_i) %in% n.p)){
+      var.cur.reg[,desc] <- var.cur.reg[,desc] + var.cur.node
+    }
+  }
+  
+  
+  if(any(c(sv_i, the_i) %in% n.p)){
+    # calculate weight matrix
+    if(any(is.infinite(var.cur.reg))){stop("inf values", call. = F)}
+    w <- exp(t(var.reg))*t(var.cur.reg)
+    if(nr[3] == 1) w <- cbind(exp(colSums(var.reg)), w)
+    w <- w/rowSums(w)
+  
+    # calculate expectation
+    e <- w%*%the
+    mat$e[[1]] <- T
+    mat$e[[2]] <- e
+  }
+  
+  # calculate variance covariance
+  if (any(c(sv_i, sig_i) %in% n.p))
+  {
+    if(any(is.infinite(covar.reg))){stop("inf values", call. = F)}
+    v <- exp(t(matrix(0, n, n) + colSums(var.reg)) + colSums(var.reg)) * covar.reg
+    # determinant
+    det <- as.numeric(determinant(v)$modulus)
+    mat$det[[1]] <- T
+    mat$det[[2]] <- det
+    # inverse
+    inv <- solve(v)
+    mat$inv[[1]] <- T
+    mat$inv[[2]] <- inv
+  }
+  
+  return(mat)
 
 }
-
-
-# input: alpha, T - total tree length, s - branch length
-# does: transform branch length according to OU-model; see Butler and King 2004, appendix eq. A5
-vcvMat <- function(alpha, T, s){
-
-	v.mat <- exp(-2 * alpha * (T-s)) * (1-exp(-2 * alpha * s))
-	return(v.mat)
-}
-
-
-# input: i - lineage number (e.g. starting node), j - regime, e - output from exp.mat, n.sp - number of species
-# does: traverse lineage and sums already exponentiated branch length; does it repeatedly for each regime column
-travLineage <- function(i, j, e, n.sp, t.sum=0){
-	
-	add = e[which(e[, 2] == i), j] 
-	if ( i == n.sp + 1){ 
-		return(t.sum)
-	} else {
-		t.sum <- t.sum + add 
-		pa <- e[e[, 2] == i][1]
-		t.sum <- travLineage(pa, j, e, n.sp, t.sum)
-	} 
-}
-
-# input: tree - phylo.object , map - output from relSim function [matrix], alpha, T.len - total tree length
-# does: take nodes, assign age to each node, exponentiate node age and calculate the difference  between each from-to pair; see Butler and King 2004, appendix eq. A4 and A7 
-expMat <- function(tree, map, alpha, T.len){
-	
-	
-	d <- cbind(tree$edge,tree$edge.length)
-	br <- branching.times(tree)
-	#names(br)[1]<-as.character(as.numeric(names(br)[2])-1) #<- THIS MUST BE CODED IN A BETTER WAY TO ENSURE NAMES OF THE BRANCHING TIMES
-	d <- cbind(d, T.len - br[match(d[, 1], names(br))], T.len - br[match(d[, 2], names(br))])
-	d[which(is.na(d[, 5])), 5] <- T.len
-	e <- exp(-alpha * T.len) * (exp(alpha * d[, 5]) - exp(alpha * d[, 4]))
-	e <- cbind(tree$edge, exp(-alpha * T.len), e * map)
-	return(e)
-	
-}
-
-
-# input: n.reg - number of regimes (without theta0), e - output from expMat, n.sp - number of species
-# does: construct a weight matrix;  see Butler and King 2004, appendix eq. A7 
-weigthMat <- function(n.reg, e, n.sp ){
-	
-	w.mat <- matrix(nrow=n.sp, ncol=(n.reg + 1), 0)
-	w.mat[, 1]<- e[1, 3] #get the zero regime
-	
-	for (j in 1:n.reg){
-		for (i in 1:n.sp){
-			w.mat[i, j+1]=travLineage(i, j+3, e, n.sp) 
-		}
-	}
-	
-	return(w.mat)
-}
-
-
-
-# input: pars - c(alpha,sig.sq,theta0,theta1...thetaN), sigma.val, tree and map (output from relSim)
-# does: calculate log-likelihood; see Butler and King 2004, appendix eq. A8 and A9 
-likOU <- function(pars, x, tree, map){ #x - vertical, theta - horizontal, pars - alpha, sig.sq, thetas
-	
-	 # extract variables
-	 alpha  <- pars[1]
-	 sig.sq <- pars[2]
-	 n.reg  <- length(pars)-3
-	 theta  <- pars[3:length(pars)]
-	 t.vcv  <- vcv(tree)
-	 T.len  <- t.vcv[1, 1]
-	 n      <- dim(t.vcv)[1]
-	 
-	 # calculate matricies
-	 t.vcv <- sig.sq/(2 * alpha) * (vcvMat(alpha, T.len, t.vcv))
-	 e     <- expMat(tree, map, alpha, T.len)
-	 w     <- weigthMat(n.reg, e, n)
-	 DET   <- determinant(t.vcv, logarithm=T)
-
-	 log.lik.OU <- try((-n * log(2 * pi)/2 - (as.numeric(DET$modulus))/2 - (t(x - w%*%theta)%*%ginv(t.vcv)%*%(x - w%*%theta))/2),silent=T)
-
-	 #print(log.lik)
-	 if (is.na(log.lik.OU) | (class( log.lik.OU) == "try-error" )) {
-		return(-Inf)
-	 } else {
-		return(log.lik.OU)
-	 }
-
-}
-
-
-

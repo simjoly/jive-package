@@ -1,0 +1,87 @@
+#' @title Simulate JIVE process
+#' @description Generate random values of trait mean and variance simulated under a JIVE process along a phylogenetic tree
+#' 
+#' @details map : the list must be ordered in the same order than phy$edge. Each element represents an edge and contains a vector indicating the time spent under each regime in the branch. The name of the regimes must appear on the map
+#' pars : list containing parameters depending on the chosen model. Elements of that lists must be vectors of size 1 or n, with n = number of regimes in the map.
+#' Each element of pars must be named with the corresponding parameter abbreviation.
+#' Parameters used in the different models:
+#' 
+#' White Noise model (WN):
+#' \itemize{
+#'  \item theta0: root value, abbreviated the0 (always length 1)
+#'  \item sigma square: evolutionary rate, abbreviated sig
+#' }
+#' 
+#' Brownian Motion model (BM):
+#' \itemize{
+#'  \item theta0: root value, abbreviated the0 (always length 1)
+#'  \item sigma square: evolutionary rate, abbreviated sig
+#' }
+#' 
+#' Ornstein Uhlenbeck model (OU):
+#' \itemize{
+#'  \item theta0: root value, abbreviated the0 (always length 1)
+#'  \item sigma square: evolutionary rate, abbreviated sig
+#'  \item theta: optimal value, abbreviated the
+#'  \item alpha: strength of selection), abbreviated alp
+#' }
+#' 
+#' @param phy Phylogenetic tree 
+#' @param map list containing the mapping of regimes over each edge (see details). 
+#' @param model.var model specification for the simulation of trait variance evolution. Supported models are c("OU", "BM", "WN")
+#' @param model.mean model specification for the simulation of trait mean evolution. Supported models are c("OU", "BM", "WN")					
+#' @param v.pars parameters used for the simulation of trait log(variance) evolution (see details).
+#' @param m.pars parameters used for the simulation of trait mean evolution (see details).
+#' @param sampling vector of size 2 giving the min and max number of individual per species
+#' @param m.bounds vector of size 2 giving the bounds of the mean
+#' @param v.bounds vector of size 2 giving the bounds of the Log(variance)
+#'
+#' @import ape
+#' @export
+#' @author Theo Gaboriau
+#' @return returns the simulated mean and variance of the trait for each tip
+#' @examples
+#'
+#' library(phytools)
+#' phy <- pbtree(n = 50)
+#' Q <- cbind(c(-.002, .002), c(.002, -.002))
+#' phy <- sim.history(phy, Q = Q)
+#' # MBM and VOU
+#' jive_phy <- sim_jive(phy, phy$maps)
+#' 
+#' # MWN + sigma and VOU + theta + root + alpha
+#' jive_phy <- sim_jive(phy, phy$maps, "WN", "OU",  v.pars = list(the0 = 10, the = c(5,10), 
+#' sig = 0.1, alp = c(0.2, 0.8)), m.pars = list(the0 = 0, sig = c(0.1, 0.5)))
+#' 
+#' @encoding UTF-8
+
+sim_jive <- function(phy, map = NULL, model.mean="BM", model.var="OU",
+                    m.pars = list(the0 = 0, sig = 0.1), v.pars = list(the0 = 2, the = 1, sig = 0.1, alp = 1),
+                     sampling = c(1, 7), m.bounds = c(-Inf, Inf), v.bounds = c(-Inf, Inf)){
+  
+  ntips <- length(phy$tip.label)
+  
+  ## Simulations for mean
+  if(any(sapply(m.pars, length) == 1)) map.mean <- lapply(phy$edge.length, function(x) c('1'= x))
+  else map.mean <- map
+  mean <- sim_pet(phy, map.mean, model.mean, m.pars, ntips, m.bounds)
+  
+  ## Simulations for var
+  if(any(sapply(m.pars, length) == 1)) map.var <- lapply(phy$edge.length, function(x) c('1'= x))
+  else map.var <- map
+  var <- sim_pet(phy, map.var, model.var, v.pars, ntips, v.bounds)
+  
+  mv <- cbind(mean, var)
+  colnames(mv) <- c("Mean", "Logvariance")
+  ## sample individuals in each species
+  sp <- data.frame(do.call(rbind,lapply(rownames(mv)[1:ntips], function(x){
+    ind <- rnorm(sample(seq(sampling[1], sampling[2]),1), mv[x,1], sqrt(exp(mv[x,2])))
+    cbind(sp = rep(x, length(ind)), ind)
+  })))
+
+  out <- list(moments = mv[1:ntips,], obs = sp)
+  
+  return(out)
+  
+}
+
